@@ -1,0 +1,49 @@
+# Makefile para Chat-Box CUDA - Smart Home
+# CC3086 - Laboratorio 9
+
+# Compilador
+NVCC = nvcc
+
+# Flags de compilación
+NVCCFLAGS = -O3 -std=c++17 -arch=sm_75 --use_fast_math
+NVCCFLAGS += -Xcompiler -Wall -Xcompiler -Wextra
+
+# Archivos
+TARGET = chatbox_cuda
+SOURCES = main.cu
+HEADERS = 
+
+# Reglas
+all: $(TARGET)
+
+$(TARGET): $(SOURCES) $(HEADERS)
+	@echo "Compilando $(TARGET)..."
+	$(NVCC) $(NVCCFLAGS) $(SOURCES) -o $(TARGET)
+	@echo "Compilación exitosa!"
+
+# Ejecutar
+run: $(TARGET)
+	@echo "Ejecutando $(TARGET)..."
+	./$(TARGET)
+
+# Benchmark con diferentes configuraciones
+benchmark: $(TARGET)
+	@echo "=== Benchmark con 1 stream ==="
+	./$(TARGET)
+	@echo ""
+	@echo "=== Benchmark con múltiples queries ==="
+	./$(TARGET)
+
+# Limpiar
+clean:
+	rm -f $(TARGET) *.o
+
+# Profile con nvprof
+profile: $(TARGET)
+	nvprof --print-gpu-trace ./$(TARGET)
+
+# Información de device
+info:
+	$(NVCC) -arch=sm_75 --run main.cu -device-info
+
+.PHONY: all run benchmark clean profile info
