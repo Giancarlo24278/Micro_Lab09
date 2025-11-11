@@ -1,9 +1,12 @@
+%%writefile main.cu
+
 // CC3086 - Lab 9: Smart Home Chat-Box con IA (CUDA)
 // Dominio: Smart Home / Energy Management
 // Compilar: nvcc -O3 -std=c++17 main.cu -o chatbox_cuda
 
 #include <cuda_runtime.h>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -15,10 +18,10 @@
 // ======================= Utilidades =======================
 #define CUDA_OK(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char *file, int line){
-    if (code != cudaSuccess){ 
+    if (code != cudaSuccess){
         fprintf(stderr,"CUDA Error: %s %s %d\n",
-        cudaGetErrorString(code), file, line); 
-        exit(code); 
+        cudaGetErrorString(code), file, line);
+        exit(code);
     }
 }
 
@@ -63,16 +66,16 @@ void l2normalize(float* __restrict__ v, int d){
     }
     ssum[threadIdx.x] = acc;
     __syncthreads();
-    
+
     for (int offset = blockDim.x>>1; offset > 0; offset >>= 1){
-        if (threadIdx.x < offset) 
+        if (threadIdx.x < offset)
             ssum[threadIdx.x] += ssum[threadIdx.x+offset];
         __syncthreads();
     }
-    
+
     float norm = sqrtf(ssum[0] + 1e-12f);
     __syncthreads();
-    
+
     for (int j = threadIdx.x; j < d; j += blockDim.x){
         v[j] = v[j] / norm;
     }
@@ -83,9 +86,9 @@ void matvecDotCos(const float* __restrict__ M, const float* __restrict__ vq,
                   float* __restrict__ scores, int K, int D){
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     if (k >= K) return;
-    
+
     float acc = 0.f;
-    for (int j = 0; j < D; ++j) 
+    for (int j = 0; j < D; ++j)
         acc += M[k*D + j] * vq[j];
     scores[k] = acc;
 }
@@ -93,17 +96,17 @@ void matvecDotCos(const float* __restrict__ M, const float* __restrict__ vq,
 // ======================= Kernels Sensores =======================
 __global__
 void window_stats_advanced(const float* __restrict__ X, int N, int C, int W,
-                          float* __restrict__ mean_out, 
+                          float* __restrict__ mean_out,
                           float* __restrict__ std_out,
                           float* __restrict__ max_out,
                           float* __restrict__ min_out){
     int c = blockIdx.x;
     if (c >= C) return;
-    
+
     float sum = 0.f, sum2 = 0.f;
     float local_max = -1e9f, local_min = 1e9f;
     int start = max(0, N - W);
-    
+
     for (int i = threadIdx.x; i < W; i += blockDim.x){
         float v = X[(start + i)*C + c];
         sum += v;
@@ -111,14 +114,14 @@ void window_stats_advanced(const float* __restrict__ X, int N, int C, int W,
         local_max = fmaxf(local_max, v);
         local_min = fminf(local_min, v);
     }
-    
+
     __shared__ float ssum[256], ssum2[256], smax[256], smin[256];
     ssum[threadIdx.x] = sum;
     ssum2[threadIdx.x] = sum2;
     smax[threadIdx.x] = local_max;
     smin[threadIdx.x] = local_min;
     __syncthreads();
-    
+
     for (int off = blockDim.x>>1; off > 0; off >>= 1){
         if (threadIdx.x < off){
             ssum[threadIdx.x] += ssum[threadIdx.x+off];
@@ -128,7 +131,7 @@ void window_stats_advanced(const float* __restrict__ X, int N, int C, int W,
         }
         __syncthreads();
     }
-    
+
     if (threadIdx.x == 0){
         float m = ssum[0] / W;
         float var = fmaxf(ssum2[0]/W - m*m, 0.f);
@@ -140,9 +143,9 @@ void window_stats_advanced(const float* __restrict__ X, int N, int C, int W,
 }
 
 // ======================= Kernel Fusión/Decisión =======================
-enum Intent { 
-    ENCENDER=0, APAGAR=1, CONSULTAR=2, PROGRAMAR=3, 
-    ESTADO=4, AYUDA=5, AHORRO=6, DIAGNOSTICO=7 
+enum Intent {
+    ENCENDER=0, APAGAR=1, CONSULTAR=2, PROGRAMAR=3,
+    ESTADO=4, AYUDA=5, AHORRO=6, DIAGNOSTICO=7
 };
 
 // Kernel con reducción apropiada para encontrar máximo
@@ -152,12 +155,12 @@ void fuseDecision(const float* __restrict__ scores, int K,
                   const float* __restrict__ maxC,
                   float consumo_umbral_alto,
                   float consumo_umbral_bajo,
-                  int* __restrict__ outDecision, 
+                  int* __restrict__ outDecision,
                   int* __restrict__ outTop,
                   float* __restrict__ outConfidence){
     __shared__ float sScores[128];
     __shared__ int sIndices[128];
-    
+
     // Inicializar con valores del thread
     int tid = threadIdx.x;
     if (tid < K) {
@@ -168,7 +171,7 @@ void fuseDecision(const float* __restrict__ scores, int K,
         sIndices[tid] = -1;
     }
     __syncthreads();
-    
+
     // Reducción para encontrar el máximo score
     for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
         if (tid < offset) {
@@ -179,19 +182,19 @@ void fuseDecision(const float* __restrict__ scores, int K,
         }
         __syncthreads();
     }
-    
+
     if (tid == 0) {
         int topIdx = sIndices[0];
         float topScore = sScores[0];
-        
+
         *outTop = topIdx;
         *outConfidence = topScore;
-        
+
         int decision = 0;
         float consumo = meanC[1];
         float temp = meanC[0];
         float ocupacion = meanC[3];
-        
+
         if (topIdx == ENCENDER) {
             if (consumo < consumo_umbral_alto) {
                 decision = 1;
@@ -216,7 +219,7 @@ void fuseDecision(const float* __restrict__ scores, int K,
         else if (topIdx == DIAGNOSTICO) {
             decision = 1;
         }
-        
+
         *outDecision = decision;
     }
 }
@@ -225,7 +228,7 @@ void fuseDecision(const float* __restrict__ scores, int K,
 void initIntentPrototypes(std::vector<float>& M){
     srand(42);
     M.resize(K * D);
-    
+
     for (int k=0; k<K; ++k){
         double acc=0;
         for (int j=0; j<D; ++j){
@@ -255,16 +258,16 @@ std::vector<std::string> getDemoQueries(){
 void synthSensors(std::vector<float>& X){
     X.resize(size_t(N)*C);
     srand(7);
-    
+
     for (int i=0; i<N; ++i){
         float temp = 20.f + (rand()%1000)/1000.f * 10.f;
         float consumo = 500.f + (rand()%1000)/1000.f * 2000.f;
         float luz = 100.f + (rand()%1000)/1000.f * 900.f;
         float ocup = (rand()%100) < 30 ? 1.f : 0.f;
-        
-        X[i*C+0]=temp; 
-        X[i*C+1]=consumo; 
-        X[i*C+2]=luz; 
+
+        X[i*C+0]=temp;
+        X[i*C+1]=consumo;
+        X[i*C+2]=luz;
         X[i*C+3]=ocup;
     }
 }
@@ -272,28 +275,28 @@ void synthSensors(std::vector<float>& X){
 // ======================= Main =======================
 int main(){
     printf("=== Smart Home Energy Chat-Box con CUDA ===\n\n");
-    
+
     // Streams
     cudaStream_t sNLU, sDATA, sFUSE, sLOG;
     CUDA_OK(cudaStreamCreate(&sNLU));
     CUDA_OK(cudaStreamCreate(&sDATA));
     CUDA_OK(cudaStreamCreate(&sFUSE));
     CUDA_OK(cudaStreamCreate(&sLOG));
-    
+
     // Eventos
     cudaEvent_t evStart, evStop, evNLU, evDATA;
     CUDA_OK(cudaEventCreate(&evStart));
     CUDA_OK(cudaEventCreate(&evStop));
     CUDA_OK(cudaEventCreate(&evNLU));
     CUDA_OK(cudaEventCreate(&evDATA));
-    
+
     // Intent prototypes M(KxD)
-    std::vector<float> hM; 
+    std::vector<float> hM;
     initIntentPrototypes(hM);
     float *dM=nullptr;
     CUDA_OK(cudaMalloc(&dM, K*D*sizeof(float)));
     CUDA_OK(cudaMemcpy(dM, hM.data(), K*D*sizeof(float), cudaMemcpyHostToDevice));
-    
+
     // Buffers NLU (pinned)
     char *hQ=nullptr;
     float *hVQ=nullptr, *dVQ=nullptr, *dScores=nullptr, *hScores=nullptr;
@@ -302,14 +305,14 @@ int main(){
     CUDA_OK(cudaHostAlloc(&hScores, K*sizeof(float), cudaHostAllocDefault));
     CUDA_OK(cudaMalloc(&dVQ, D*sizeof(float)));
     CUDA_OK(cudaMalloc(&dScores, K*sizeof(float)));
-    
+
     // Sensores (pinned)
-    std::vector<float> hXvec; 
+    std::vector<float> hXvec;
     synthSensors(hXvec);
     float *hX=nullptr;
     CUDA_OK(cudaHostAlloc(&hX, size_t(N)*C*sizeof(float), cudaHostAllocDefault));
     memcpy(hX, hXvec.data(), size_t(N)*C*sizeof(float));
-    
+
     float *dX=nullptr, *dMean=nullptr, *dStd=nullptr, *dMax=nullptr, *dMin=nullptr;
     float hMean[C]={0}, hStd[C]={0}, hMax[C]={0}, hMin[C]={0};
     CUDA_OK(cudaMalloc(&dX, size_t(N)*C*sizeof(float)));
@@ -317,7 +320,7 @@ int main(){
     CUDA_OK(cudaMalloc(&dStd, C*sizeof(float)));
     CUDA_OK(cudaMalloc(&dMax, C*sizeof(float)));
     CUDA_OK(cudaMalloc(&dMin, C*sizeof(float)));
-    
+
     // Fusión
     int *dDecision=nullptr, *dTop=nullptr;
     float *dConfidence=nullptr;
@@ -326,92 +329,92 @@ int main(){
     CUDA_OK(cudaMalloc(&dDecision, sizeof(int)));
     CUDA_OK(cudaMalloc(&dTop, sizeof(int)));
     CUDA_OK(cudaMalloc(&dConfidence, sizeof(float)));
-    
+
     char *dQ=nullptr;
     CUDA_OK(cudaMalloc(&dQ, MAX_QUERY));
-    
+
     // CORREGIDO: Alocar buffers auxiliares FUERA del loop
     float *dMeanHost=nullptr, *dMaxHost=nullptr;
     CUDA_OK(cudaMalloc(&dMeanHost, C*sizeof(float)));
     CUDA_OK(cudaMalloc(&dMaxHost, C*sizeof(float)));
-    
+
     // Nombres de intenciones
     static const char* intentNames[K] = {
         "ENCENDER", "APAGAR", "CONSULTAR", "PROGRAMAR",
         "ESTADO", "AYUDA", "AHORRO", "DIAGNOSTICO"
     };
-    
+
     // Procesar múltiples queries
     auto queries = getDemoQueries();
     std::vector<float> latencies;
-    
+
     printf("Procesando %zu consultas...\n\n", queries.size());
-    
+
     for (size_t qi = 0; qi < queries.size(); ++qi) {
         std::string q = queries[qi];
         int qn = std::min<int>(q.size(), MAX_QUERY);
-        
-        memset(hQ, 0, MAX_QUERY); 
+
+        memset(hQ, 0, MAX_QUERY);
         memcpy(hQ, q.data(), qn);
-        
+
         // Pipeline asíncrono
         CUDA_OK(cudaEventRecord(evStart, 0));
-        
+
         // === STREAM NLU ===
         CUDA_OK(cudaMemsetAsync(dVQ, 0, D*sizeof(float), sNLU));
         CUDA_OK(cudaMemcpyAsync(dQ, hQ, MAX_QUERY, cudaMemcpyHostToDevice, sNLU));
-        
+
         dim3 blk(256), grd(ceilDiv(qn, (int)blk.x));
         tokenize3grams<<<grd, blk, 0, sNLU>>>(dQ, qn, dVQ);
         l2normalize<<<1, 256, 0, sNLU>>>(dVQ, D);
-        
+
         dim3 blk2(128), grd2(ceilDiv(K, (int)blk2.x));
         matvecDotCos<<<grd2, blk2, 0, sNLU>>>(dM, dVQ, dScores, K, D);
-        CUDA_OK(cudaMemcpyAsync(hScores, dScores, K*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(hScores, dScores, K*sizeof(float),
                                cudaMemcpyDeviceToHost, sNLU));
         CUDA_OK(cudaEventRecord(evNLU, sNLU));
-        
+
         // === STREAM DATA ===
-        CUDA_OK(cudaMemcpyAsync(dX, hX, size_t(N)*C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(dX, hX, size_t(N)*C*sizeof(float),
                                cudaMemcpyHostToDevice, sDATA));
         window_stats_advanced<<<C, 256, 0, sDATA>>>(dX, N, C, W, dMean, dStd, dMax, dMin);
-        CUDA_OK(cudaMemcpyAsync(hMean, dMean, C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(hMean, dMean, C*sizeof(float),
                                cudaMemcpyDeviceToHost, sDATA));
-        CUDA_OK(cudaMemcpyAsync(hStd, dStd, C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(hStd, dStd, C*sizeof(float),
                                cudaMemcpyDeviceToHost, sDATA));
-        CUDA_OK(cudaMemcpyAsync(hMax, dMax, C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(hMax, dMax, C*sizeof(float),
                                cudaMemcpyDeviceToHost, sDATA));
-        CUDA_OK(cudaMemcpyAsync(hMin, dMin, C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(hMin, dMin, C*sizeof(float),
                                cudaMemcpyDeviceToHost, sDATA));
         CUDA_OK(cudaEventRecord(evDATA, sDATA));
-        
+
         // Esperar ambos streams
         CUDA_OK(cudaStreamWaitEvent(sFUSE, evNLU, 0));
         CUDA_OK(cudaStreamWaitEvent(sFUSE, evDATA, 0));
-        
+
         // === STREAM FUSE ===
-        CUDA_OK(cudaMemcpyAsync(dMeanHost, hMean, C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(dMeanHost, hMean, C*sizeof(float),
                                cudaMemcpyHostToDevice, sFUSE));
-        CUDA_OK(cudaMemcpyAsync(dMaxHost, hMax, C*sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(dMaxHost, hMax, C*sizeof(float),
                                cudaMemcpyHostToDevice, sFUSE));
-        
+
         fuseDecision<<<1, 128, 0, sFUSE>>>(dScores, K, dMeanHost, dMaxHost,
                                            2000.f, 1000.f, dDecision, dTop, dConfidence);
-        CUDA_OK(cudaMemcpyAsync(&hDecision, dDecision, sizeof(int), 
+        CUDA_OK(cudaMemcpyAsync(&hDecision, dDecision, sizeof(int),
                                cudaMemcpyDeviceToHost, sFUSE));
-        CUDA_OK(cudaMemcpyAsync(&hTop, dTop, sizeof(int), 
+        CUDA_OK(cudaMemcpyAsync(&hTop, dTop, sizeof(int),
                                cudaMemcpyDeviceToHost, sFUSE));
-        CUDA_OK(cudaMemcpyAsync(&hConfidence, dConfidence, sizeof(float), 
+        CUDA_OK(cudaMemcpyAsync(&hConfidence, dConfidence, sizeof(float),
                                cudaMemcpyDeviceToHost, sFUSE));
-        
+
         CUDA_OK(cudaStreamSynchronize(sFUSE));
         CUDA_OK(cudaEventRecord(evStop, 0));
         CUDA_OK(cudaEventSynchronize(evStop));
-        
-        float ms=0; 
+
+        float ms=0;
         CUDA_OK(cudaEventElapsedTime(&ms, evStart, evStop));
         latencies.push_back(ms);
-        
+
         // Resultados
         printf("=== Query %zu ===\n", qi+1);
         printf("Input: \"%s\"\n", q.c_str());
@@ -421,13 +424,13 @@ int main(){
         printf("  Consumo: %.0fW (max: %.0fW)\n", hMean[1], hMax[1]);
         printf("  Luz: %.0f lux\n", hMean[2]);
         printf("  Ocupación: %.0f%%\n", hMean[3]*100);
-        
-        const char* decisionStr = (hDecision == 1) ? "✓ PERMITIR" : 
+
+        const char* decisionStr = (hDecision == 1) ? "✓ PERMITIR" :
                                   (hDecision == 2) ? "⚠ WARNING" : "✗ DENEGAR";
         printf("Decision: %s\n", decisionStr);
         printf("Latencia: %.3f ms\n\n", ms);
     }
-    
+
     // Estadísticas finales
     float avg_latency = 0.f, min_lat = 1e9f, max_lat = 0.f;
     for (float lat : latencies) {
@@ -436,18 +439,18 @@ int main(){
         max_lat = std::max(max_lat, lat);
     }
     avg_latency /= latencies.size();
-    
+
     printf("=== Métricas de Rendimiento ===\n");
     printf("Queries procesadas: %zu\n", queries.size());
     printf("Latencia promedio: %.3f ms\n", avg_latency);
     printf("Latencia min: %.3f ms\n", min_lat);
     printf("Latencia max: %.3f ms\n", max_lat);
     printf("QPS estimado: %.1f queries/sec\n", 1000.0f / avg_latency);
-    
+
     // Liberar buffers auxiliares
     cudaFree(dMeanHost);
     cudaFree(dMaxHost);
-    
+
     // Limpieza
     cudaFree(dQ); cudaFree(dVQ); cudaFree(dScores); cudaFree(dM);
     cudaFree(dX); cudaFree(dMean); cudaFree(dStd); cudaFree(dMax); cudaFree(dMin);
@@ -455,9 +458,9 @@ int main(){
     cudaFreeHost(hQ); cudaFreeHost(hVQ); cudaFreeHost(hScores); cudaFreeHost(hX);
     cudaEventDestroy(evStart); cudaEventDestroy(evStop);
     cudaEventDestroy(evNLU); cudaEventDestroy(evDATA);
-    cudaStreamDestroy(sNLU); cudaStreamDestroy(sDATA); 
+    cudaStreamDestroy(sNLU); cudaStreamDestroy(sDATA);
     cudaStreamDestroy(sFUSE); cudaStreamDestroy(sLOG);
-    
+
     printf("\n=== Finalizado exitosamente ===\n");
     return 0;
 }
