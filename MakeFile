@@ -1,3 +1,5 @@
+%%writefile Makefile
+
 # Makefile para Chat-Box CUDA - Smart Home
 # CC3086 - Laboratorio 9
 
