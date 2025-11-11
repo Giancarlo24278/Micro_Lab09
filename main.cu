@@ -25,16 +25,13 @@ inline void gpuAssert(cudaError_t code, const char *file, int line){
 inline int ceilDiv(int a, int b){ return (a + b - 1) / b; }
 
 // ======================= Parámetros =======================
-// Vectorización 3-gramas -> espacio D
-constexpr int D = 8192;           // dimensión de representación
-constexpr int K = 8;              // intenciones: encender, apagar, consultar, programar, estado, ayuda, ahorro, diagnostico
-constexpr int TOPK = 3;           // sugerencias
-constexpr int MAX_QUERY = 512;    // longitud máx. de consulta
-
-// Sensores: temperatura, consumo_w, luz_lux, ocupacion
-constexpr int C = 4;              
-constexpr int N = 1<<20;          // ~1M muestras
-constexpr int W = 2048;           // ventana para stats
+constexpr int D = 8192;
+constexpr int K = 8;
+constexpr int TOPK = 3;
+constexpr int MAX_QUERY = 512;
+constexpr int C = 4;
+constexpr int N = 1<<20;
+constexpr int W = 2048;
 
 // ======================= Hash 3-gramas =======================
 __device__ __forceinline__
@@ -47,7 +44,6 @@ uint32_t hash3(uint8_t a, uint8_t b, uint8_t c){
 }
 
 // ======================= Kernels NLU =======================
-// Kernel 1: Tokenización 3-gramas
 __global__
 void tokenize3grams(const char* __restrict__ query, int n,
                     float* __restrict__ vq){
@@ -57,7 +53,6 @@ void tokenize3grams(const char* __restrict__ query, int n,
     atomicAdd(&vq[idx], 1.0f);
 }
 
-// Kernel 2: Normalización L2
 __global__
 void l2normalize(float* __restrict__ v, int d){
     __shared__ float ssum[256];
@@ -83,7 +78,6 @@ void l2normalize(float* __restrict__ v, int d){
     }
 }
 
-// Kernel 3: Similitud coseno (scores = M·vq)
 __global__
 void matvecDotCos(const float* __restrict__ M, const float* __restrict__ vq,
                   float* __restrict__ scores, int K, int D){
@@ -97,7 +91,6 @@ void matvecDotCos(const float* __restrict__ M, const float* __restrict__ vq,
 }
 
 // ======================= Kernels Sensores =======================
-// Kernel 4: Estadísticas de ventana (mean, std, max, min)
 __global__
 void window_stats_advanced(const float* __restrict__ X, int N, int C, int W,
                           float* __restrict__ mean_out, 
@@ -152,7 +145,7 @@ enum Intent {
     ESTADO=4, AYUDA=5, AHORRO=6, DIAGNOSTICO=7 
 };
 
-// Kernel 5: Fusión y decisión
+// Kernel con reducción apropiada para encontrar máximo
 __global__
 void fuseDecision(const float* __restrict__ scores, int K,
                   const float* __restrict__ meanC,
@@ -162,63 +155,65 @@ void fuseDecision(const float* __restrict__ scores, int K,
                   int* __restrict__ outDecision, 
                   int* __restrict__ outTop,
                   float* __restrict__ outConfidence){
-    __shared__ int topIdx;
-    __shared__ float topScore;
+    __shared__ float sScores[128];
+    __shared__ int sIndices[128];
     
-    if (threadIdx.x == 0){ 
-        topIdx = 0; 
-        topScore = scores[0]; 
+    // Inicializar con valores del thread
+    int tid = threadIdx.x;
+    if (tid < K) {
+        sScores[tid] = scores[tid];
+        sIndices[tid] = tid;
+    } else {
+        sScores[tid] = -1e9f;
+        sIndices[tid] = -1;
     }
     __syncthreads();
     
-    // Encontrar top intent
-    for (int k = threadIdx.x; k < K; k += blockDim.x){
-        float s = scores[k];
-        if (s > topScore){ 
-            topScore = s; 
-            topIdx = k; 
+    // Reducción para encontrar el máximo score
+    for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+        if (tid < offset) {
+            if (sScores[tid + offset] > sScores[tid]) {
+                sScores[tid] = sScores[tid + offset];
+                sIndices[tid] = sIndices[tid + offset];
+            }
         }
+        __syncthreads();
     }
-    __syncthreads();
     
-    if (threadIdx.x == 0){
+    if (tid == 0) {
+        int topIdx = sIndices[0];
+        float topScore = sScores[0];
+        
         *outTop = topIdx;
         *outConfidence = topScore;
         
-        int decision = 0; // 0=denegar, 1=permitir, 2=warning
-        float consumo = meanC[1]; // consumo_w
+        int decision = 0;
+        float consumo = meanC[1];
         float temp = meanC[0];
         float ocupacion = meanC[3];
         
-        // Lógica de decisión por intención
         if (topIdx == ENCENDER) {
-            // Permitir encender si consumo no está muy alto
             if (consumo < consumo_umbral_alto) {
                 decision = 1;
             } else {
-                decision = 2; // warning: consumo alto
+                decision = 2;
             }
         }
         else if (topIdx == APAGAR) {
-            // Siempre permitir apagar
             decision = 1;
         }
         else if (topIdx == CONSULTAR || topIdx == ESTADO) {
-            // Siempre permitir consultas
             decision = 1;
         }
         else if (topIdx == AHORRO) {
-            // Modo ahorro: solo si consumo está alto
             if (consumo > consumo_umbral_bajo) {
                 decision = 1;
             }
         }
         else if (topIdx == PROGRAMAR) {
-            // Permitir programación
             decision = 1;
         }
         else if (topIdx == DIAGNOSTICO) {
-            // Diagnóstico siempre disponible
             decision = 1;
         }
         
@@ -228,15 +223,12 @@ void fuseDecision(const float* __restrict__ scores, int K,
 
 // ======================= Host Helpers =======================
 void initIntentPrototypes(std::vector<float>& M){
-    // KxD matriz de prototipos por intención
     srand(42);
     M.resize(K * D);
     
-    // Patrones diferentes por cada intención
     for (int k=0; k<K; ++k){
         double acc=0;
         for (int j=0; j<D; ++j){
-            // Semilla única por intención
             unsigned int seed = (k+1)*1103515245u + j*12345u;
             float v = float((seed % 1000)) / 1000.0f;
             M[k*D+j] = v;
@@ -261,15 +253,14 @@ std::vector<std::string> getDemoQueries(){
 }
 
 void synthSensors(std::vector<float>& X){
-    // N x C: {temperatura, consumo_w, luz_lux, ocupacion}
     X.resize(size_t(N)*C);
     srand(7);
     
     for (int i=0; i<N; ++i){
-        float temp = 20.f + (rand()%1000)/1000.f * 10.f;      // 20-30°C
-        float consumo = 500.f + (rand()%1000)/1000.f * 2000.f; // 500-2500W
-        float luz = 100.f + (rand()%1000)/1000.f * 900.f;      // 100-1000 lux
-        float ocup = (rand()%100) < 30 ? 1.f : 0.f;            // 30% ocupado
+        float temp = 20.f + (rand()%1000)/1000.f * 10.f;
+        float consumo = 500.f + (rand()%1000)/1000.f * 2000.f;
+        float luz = 100.f + (rand()%1000)/1000.f * 900.f;
+        float ocup = (rand()%100) < 30 ? 1.f : 0.f;
         
         X[i*C+0]=temp; 
         X[i*C+1]=consumo; 
@@ -339,6 +330,11 @@ int main(){
     char *dQ=nullptr;
     CUDA_OK(cudaMalloc(&dQ, MAX_QUERY));
     
+    // CORREGIDO: Alocar buffers auxiliares FUERA del loop
+    float *dMeanHost=nullptr, *dMaxHost=nullptr;
+    CUDA_OK(cudaMalloc(&dMeanHost, C*sizeof(float)));
+    CUDA_OK(cudaMalloc(&dMaxHost, C*sizeof(float)));
+    
     // Nombres de intenciones
     static const char* intentNames[K] = {
         "ENCENDER", "APAGAR", "CONSULTAR", "PROGRAMAR",
@@ -394,10 +390,6 @@ int main(){
         CUDA_OK(cudaStreamWaitEvent(sFUSE, evDATA, 0));
         
         // === STREAM FUSE ===
-        float *dMeanHost=nullptr;
-        float *dMaxHost=nullptr;
-        CUDA_OK(cudaMalloc(&dMeanHost, C*sizeof(float)));
-        CUDA_OK(cudaMalloc(&dMaxHost, C*sizeof(float)));
         CUDA_OK(cudaMemcpyAsync(dMeanHost, hMean, C*sizeof(float), 
                                cudaMemcpyHostToDevice, sFUSE));
         CUDA_OK(cudaMemcpyAsync(dMaxHost, hMax, C*sizeof(float), 
@@ -434,9 +426,6 @@ int main(){
                                   (hDecision == 2) ? "⚠ WARNING" : "✗ DENEGAR";
         printf("Decision: %s\n", decisionStr);
         printf("Latencia: %.3f ms\n\n", ms);
-        
-        cudaFree(dMeanHost);
-        cudaFree(dMaxHost);
     }
     
     // Estadísticas finales
@@ -454,6 +443,10 @@ int main(){
     printf("Latencia min: %.3f ms\n", min_lat);
     printf("Latencia max: %.3f ms\n", max_lat);
     printf("QPS estimado: %.1f queries/sec\n", 1000.0f / avg_latency);
+    
+    // Liberar buffers auxiliares
+    cudaFree(dMeanHost);
+    cudaFree(dMaxHost);
     
     // Limpieza
     cudaFree(dQ); cudaFree(dVQ); cudaFree(dScores); cudaFree(dM);
