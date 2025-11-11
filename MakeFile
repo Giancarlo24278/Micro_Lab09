@@ -4,19 +4,18 @@
 # Compilador
 NVCC = nvcc
 
-# Flags de compilación
-NVCCFLAGS = -O3 -std=c++17 -arch=sm_75 --use_fast_math
+# Flags de compilación (ajustado para compatibilidad)
+NVCCFLAGS = -O3 -std=c++17
 NVCCFLAGS += -Xcompiler -Wall -Xcompiler -Wextra
 
 # Archivos
 TARGET = chatbox_cuda
 SOURCES = main.cu
-HEADERS = 
 
 # Reglas
 all: $(TARGET)
 
-$(TARGET): $(SOURCES) $(HEADERS)
+$(TARGET): $(SOURCES)
 	@echo "Compilando $(TARGET)..."
 	$(NVCC) $(NVCCFLAGS) $(SOURCES) -o $(TARGET)
 	@echo "Compilación exitosa!"
@@ -24,26 +23,25 @@ $(TARGET): $(SOURCES) $(HEADERS)
 # Ejecutar
 run: $(TARGET)
 	@echo "Ejecutando $(TARGET)..."
-	./$(TARGET)
-
-# Benchmark con diferentes configuraciones
-benchmark: $(TARGET)
-	@echo "=== Benchmark con 1 stream ==="
-	./$(TARGET)
-	@echo ""
-	@echo "=== Benchmark con múltiples queries ==="
+	@echo "================================"
 	./$(TARGET)
 
 # Limpiar
 clean:
+	@echo "Limpiando archivos..."
 	rm -f $(TARGET) *.o
+	@echo "Limpieza completa"
 
-# Profile con nvprof
+# Profile con nvprof (legacy) o ncu (moderno)
 profile: $(TARGET)
-	nvprof --print-gpu-trace ./$(TARGET)
+	@echo "Perfilando con nvprof..."
+	nvprof --print-gpu-trace ./$(TARGET) 2>&1 || \
+	ncu --target-processes all ./$(TARGET)
 
-# Información de device
-info:
-	$(NVCC) -arch=sm_75 --run main.cu -device-info
+# Verificar CUDA
+check:
+	@echo "Verificando instalación CUDA..."
+	@$(NVCC) --version || echo "NVCC no encontrado"
+	@nvidia-smi || echo "nvidia-smi no encontrado"
 
-.PHONY: all run benchmark clean profile info
+.PHONY: all run clean profile check
