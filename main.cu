@@ -1,6 +1,5 @@
 %%writefile main.cu
 // CC3086 - Lab 9: Smart Home Chat-Box con IA (CUDA + CSV)
-// Compilar: nvcc -O3 -std=c++17 main.cu -o chatbox_cuda
 
 #include <cuda_runtime.h>
 #include <cstdio>
@@ -26,10 +25,10 @@ inline void gpuAssert(cudaError_t code, const char *file, int line){
     }
 }
 
-inline int ceilDiv(int a, int b){ return (a + b - 1) / b; }
+inline int ceilDiv(int a, int b){ return (a + b - 1) / b; } //dimensiones grid
 
 // ======================= Parámetros =======================
-constexpr int D = 8192;
+constexpr int D = 8192; //dimension para NLU
 constexpr int K = 8;
 constexpr int MAX_QUERY = 512;
 constexpr int C = 7; // Luces, A/C, Riego, Puerta, Ascensor, Total, Timestamp
@@ -259,7 +258,7 @@ void analyzeData(const std::vector<SensorData>& data, int intent, const std::str
             printf("   • Total de registros: %zu\n", data.size());
             printf("   • Consumo acumulado: %.2f Wh\n", total_consumo);
             printf("   • Sistema más utilizado: ");
-            
+
             if (max_val == total_luces) printf("Luces");
             else if (max_val == total_ac) printf("A/C");
             else if (max_val == total_riego) printf("Riego");
